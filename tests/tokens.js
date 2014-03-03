@@ -23,7 +23,7 @@ Assertion.addMethod("buffer", function(buffer, enc){
         , obj
         , buffer)
 })
-
+  
 describe('when a token is requested ', function(){
     var src, toknzr, options;
 
