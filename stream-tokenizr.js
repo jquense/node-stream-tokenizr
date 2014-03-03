@@ -1,5 +1,5 @@
 'use strict';
-var Transform = require('stream').Transform
+var Transform = require('readable-stream').Transform
   , Chainable = require('simple-chainable')
   , _defaults = require('lodash.defaults')
   , binary = require('./lib/binaryHelpers')
