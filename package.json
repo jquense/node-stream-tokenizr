@@ -1,6 +1,6 @@
 {
   "name": "stream-tokenizr",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "parse and tokenize binary streams with a simple fluent, streaming api",
   "main": "stream-tokenizr.js",
   "scripts": {

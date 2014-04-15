@@ -36,6 +36,7 @@ var defaults = {
             return this.emit('error', new Error(str))
         }
     }
+
 function StreamTokenizer(opts){
     if ( !(this instanceof StreamTokenizer) ) 
         return new StreamTokenizer(opts)
@@ -44,20 +45,26 @@ function StreamTokenizer(opts){
 
     this.chainable = new Chainable()
 
-    this.options = _defaults(opts, defaults)
+    this.options = _defaults(opts || {}, defaults)
 
     this.bytesRead = 0
     this.waiting = []
     this.tokens  = {}
     this._data = []
     this._len = []
+    this._needsStart = true;
 }
 
 
 StreamTokenizer.prototype._transform = function(chunk, enc, done) {
     this._data.push(chunk)
     this._len += chunk.length
-    this.chainable.next()
+
+    if ( this._needsStart ) {
+        this._needsStart = false
+        this.chainable.next()
+    }
+
     done()
 };
 
@@ -71,7 +78,8 @@ StreamTokenizer.prototype._flush = function(done) {
         done()
     })
 
-    self.chainable.next()
+    if ( self._needsStart )
+        self.chainable.next()
 };
 
 
@@ -86,15 +94,15 @@ StreamTokenizer.prototype.parse = function(size) {
         bytes = null; 
 
     else if ( size === data[0].length ) //perfect match
-        bytes = data.shift() 
+        bytes = data.shift()
 
+    else if ( size == null) {
+        bytes = Buffer.concat( data, length )
+        data.length = 0; // clear array
+    }
     else if ( size < data[0].length ) {
         bytes         = data[0].slice(0, size)
-        this._data[0] = data[0].slice(size) 
-
-    } else if ( size == null) {
-        bytes = Buffer.concat(data, length) 
-        data.length = 0; // clear array
+        this._data[0] = data[0].slice(size)
 
     } else {
         var c = 0;
@@ -139,27 +147,6 @@ StreamTokenizer.prototype.flush = function() {
     return self
 };
 
-StreamTokenizer.prototype._getAtLeast = function(bytes, cb) {
-    var self = this;
-
-    self._getBytes('', null, function(buf){
-        var len = buf.length;
-
-        if ( self._last ){
-            len += self._last.length
-            buf = Buffer.concat( [self._last, buf], len)
-        }
-
-        if ( len < bytes ) {
-            self._last = buf
-            self.chainable.addBack()
-            return
-        } 
-
-        cb( buf )
-        self._last = null
-    })    
-};
 
 StreamTokenizer.prototype._getBytes = function(type, bytes, cb) {
     var self = this
@@ -168,9 +155,7 @@ StreamTokenizer.prototype._getBytes = function(type, bytes, cb) {
     if ( typeof bytes === 'string' && this.tokens[bytes] !== undefined)
         bytes = this.tokens[bytes]
 
-    buf = bytes === null
-        ? self.parse()
-        : self.parse(bytes)
+    buf = self.parse(bytes)
 
     if ( buf === null ){
         if ( self._flushed )
@@ -178,8 +163,10 @@ StreamTokenizer.prototype._getBytes = function(type, bytes, cb) {
                 new Error('Not enough data left in the stream to read: ' + (type || (bytes + ' byte buffer'))))
             else
                 cb.call(self, null)
-        else
+        else {
+            self._needsStart = true;
             self.chainable.addBack()
+        }
     } else {
         if ( type ) 
             buf = buf['read' + type](0)
@@ -189,8 +176,18 @@ StreamTokenizer.prototype._getBytes = function(type, bytes, cb) {
     }   
 };
 
+StreamTokenizer.prototype.addBack = function(data) {
+    this._data.unshift(data)
+    this._len += data.length
+}
+
 StreamTokenizer.prototype.readBuffer = function(size, cb) {
     var self = this;
+
+    if (typeof size === 'function'){
+        cb = size
+        size = null
+    }
 
     self.chainable.add(function(){
 
@@ -198,6 +195,17 @@ StreamTokenizer.prototype.readBuffer = function(size, cb) {
             self._callOrStore(cb, b)
             self.chainable.next()
         }) 
+    })
+
+    return self
+};
+
+StreamTokenizer.prototype.peek = function(bytes, cb) {
+    var self = this;
+
+    self.readBuffer(bytes, function(buffer){
+        self.addBack(buffer)
+        cb.call(self, buffer, self.tokens)
     })
 
     return self
@@ -222,11 +230,13 @@ StreamTokenizer.prototype.loop = function (cb) {
     }
 
     function loop () {
-        self.tap(cb.bind(self, done, self.tokens ))
-        self.tap(function () {
-            if ( !end ) loop.call(self)
-            else self.chainable.next()
-        });
+        self.tap(function(){
+                cb.call(self, done, self.tokens )
+            })
+            .tap(function () {
+                if ( !end ) loop.call(self)
+                else self.chainable.next()
+            });
         
     }
 
@@ -255,38 +265,48 @@ StreamTokenizer.prototype.skip = function(size){
     return this
 }
 
-StreamTokenizer.prototype.skipUntil = function(chunk, iter, thisArg){
+StreamTokenizer.prototype.skipUntil = function(size, iterator, thisArg){
     var self = this
-      , getAtLeast = self._getAtLeast.bind(self)
-      , buf;
+      , leftover, result, token;
+
+    if (Buffer.isBuffer(size)){
+        thisArg = iterator
+        token = size
+        iterator = function(b){
+            return binary.bufferEqual( b.slice(0, size), token)
+        }
+        size = size.length
+    }
 
     thisArg = thisArg || null;
 
-    if ( Buffer.isBuffer(chunk)){
-        buf = chunk;
-        thisArg = iter;
-        iter = getBufferIter(buf);
-    } else {
-        chunk = chunk || 1;    
-    }
+    return self.loop(function(done){
 
-    self.chainable.add(getAtLeast, chunk, function(buf){
-        var val
-          , i = 0 
-          , len = buf.length;
-            
-        for(; i < len; i++){
-            val = iter.call(thisArg, chunk === 1 ? buf[i] : buf.slice(i, i + chunk));
-            if ( val ) {
-                self.bytesRead -= buf.length - i
-                self._data.unshift(buf.slice(i))
-                break    
+        self.readBuffer(function(chunk){
+            var i = 0, len;
+
+            if (chunk === null ) return done()
+
+            if ( leftover )
+                chunk = Buffer.concat([ leftover, chunk ], leftover.length + chunk.length)
+
+            len = chunk.length
+
+            for(; (i + size) <= len; i++){
+                result = iterator.call(thisArg, chunk.slice(i))
+
+                if ( result ) {
+                    self.bytesRead -= len - i
+                    self.addBack(chunk.slice(i))
+                    return done()
+                }
             }
-        }
-        self.chainable.next()
-    });
 
-    return this
+            leftover = (i + size) > len
+                ? chunk.slice(i)
+                : null;
+        })
+    })
 }
 
 StreamTokenizer.prototype.readString = function(size, enc, cb) {
@@ -312,7 +332,7 @@ Object.keys(types).forEach(function(type){
 
     StreamTokenizer.prototype['read' + type] = function(cb){
         var self = this
-            , getBytes = self._getBytes.bind(self);
+          , getBytes = self._getBytes.bind(self);
 
         self.chainable.add(getBytes, type, types[type], function(buf){
             self._callOrStore(cb, buf)
@@ -323,11 +343,3 @@ Object.keys(types).forEach(function(type){
     }
 })
 
-function getBufferIter(buff) {
-    return function(chunk){
-        for (var i = 0; i < chunk.length; i++) {
-            if (buff[i] !== chunk[i]) 
-                return false;
-        }
-    }    
-}
