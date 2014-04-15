@@ -3,7 +3,7 @@ var chai = require('chai')
   , sinonChai = require('sinon-chai')
   , Assertion = require("chai").Assertion
   , Tokenizer = require('../stream-tokenizr')
-  , Readable  = require('stream').Readable
+  , Readable  = require('readable-stream').Readable
   , bufferEqual = require('../lib/binaryHelpers' ).bufferEqual;
 
 chai.use(sinonChai);
